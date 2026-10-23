@@ -1,0 +1,37 @@
+# Dependencias de Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+
+# Archivos de build/producción
+dist/
+build/
+
+# Variables de entorno (¡CRÍTICO! Aquí están tus claves de Firebase y Groq)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Claves de Firebase y archivos sensibles
+clave-firebase.json
+*.key
+*.pem
+serviceAccountKey.json
+
+# Scripts de carga masiva y datos
+cargar_inventario.js
+*.xlsx
+*.csv
+
+# Archivos del sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor de código (VS Code)
+.vscode/
+.idea/
