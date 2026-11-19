@@ -1,7 +1,7 @@
 //  Configuración global de FerrePOS
 
 // ÚNICO correo autorizado para ser ADMINISTRADOR (jefatura).
-export const ADMIN_EMAIL = "danielhumbertocaicedoarguello@gmail.com";
+export const ADMIN_EMAIL = "ferreposprueba@gmail.com";
 
 //  Envío de reportes y alertas por correo (EmailJS)
 export const EMAILJS_SERVICE_ID = process.env.REACT_APP_EMAILJS_SERVICE_ID || "service_im7d7by";
