@@ -24,7 +24,7 @@ import {
 } from "@mui/material";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import AddShoppingCartIcon from "@mui/icons-material/AddShoppingCart";
-import { addDoc, collection, doc, onSnapshot, runTransaction } from "firebase/firestore";
+import { collection, doc, onSnapshot, runTransaction } from "firebase/firestore";
 import { db } from "../firebase";
 import {
   campoStock,
@@ -168,38 +168,19 @@ const NewSalePage = () => {
   const quitarDelCarrito = (id) => setCarrito((c) => c.filter((i) => i.productoId !== id));
 
   const confirmarVenta = async () => {
+    if (guardando) return;
     if (carrito.length === 0) {
       return setSnack({ open: true, mensaje: "El carrito está vacío.", error: true });
     }
+
     setGuardando(true);
     try {
+      // La sede activa determina qué campo del inventario se descuenta.
       const campo = campoStock(sedeActiva);
-      const stocksFinales = [];
+      const refVenta = doc(collection(db, "ventas"));
+      const fechaVenta = new Date().toISOString();
 
-      await runTransaction(db, async (tx) => {
-        const lecturas = [];
-        for (const item of carrito) {
-          const ref = doc(db, "productos", item.productoId);
-          const snap = await tx.get(ref);
-          lecturas.push({ item, ref, data: snap.data() || {} });
-        }
-
-        for (const l of lecturas) {
-          const actual = Number(l.data[campo] ?? 0);
-          if (actual < l.item.cantidad) {
-            throw new Error(`Stock insuficiente para: ${l.item.nombre}`);
-          }
-        }
-
-        for (const l of lecturas) {
-          const actual = Number(l.data[campo] ?? 0);
-          const nuevo = actual - l.item.cantidad;
-          tx.update(l.ref, { [campo]: nuevo });
-          stocksFinales.push({ item: l.item, nuevo });
-        }
-      });
-
-      const refVenta = await addDoc(collection(db, "ventas"), {
+      const datosVenta = {
         vendedorUid: user?.uid || "sin-uid",
         vendedorNombre: user?.displayName || "Sin nombre",
         sede: sedeActiva,
@@ -207,7 +188,7 @@ const NewSalePage = () => {
           productoId: i.productoId,
           nombre: i.nombre,
           precioBase: i.precio,
-          precioCobrado: i.precioCobrado || i.precio, // Guardamos el precio editado
+          precioCobrado: i.precioCobrado || i.precio,
           cantidad: i.cantidad,
           subtotal: (i.precioCobrado || i.precio) * i.cantidad,
         })),
@@ -219,24 +200,73 @@ const NewSalePage = () => {
           },
         ],
         total,
-        fecha: new Date().toISOString(),
+        fecha: fechaVenta,
+      };
+
+      // Descontar existencias y crear la venta en la MISMA transacción.
+      // Si alguna operación falla, Firestore no guarda ninguna de ellas.
+      const stocksFinales = await runTransaction(db, async (tx) => {
+        const lecturas = [];
+
+        // Firestore exige realizar las lecturas antes de las escrituras.
+        for (const item of carrito) {
+          const ref = doc(db, "productos", item.productoId);
+          const snap = await tx.get(ref);
+          if (!snap.exists()) {
+            throw new Error(`El producto ya no existe: ${item.nombre}`);
+          }
+          lecturas.push({ item, ref, data: snap.data() });
+        }
+
+        // Comprobar las cantidades vigentes en la sede elegida.
+        for (const { item, data } of lecturas) {
+          const actual = Number(data[campo] ?? 0);
+          if (!Number.isFinite(actual) || actual < item.cantidad) {
+            throw new Error(`Stock insuficiente para: ${item.nombre}`);
+          }
+        }
+
+        const resultados = [];
+        for (const { item, ref, data } of lecturas) {
+          const actual = Number(data[campo] ?? 0);
+          const nuevo = actual - item.cantidad;
+          tx.update(ref, { [campo]: nuevo });
+          resultados.push({ item, nuevo });
+        }
+
+        tx.set(refVenta, datosVenta);
+        return resultados;
       });
 
-      for (const s of stocksFinales) {
-        registrarMovimiento({
-          productoId: s.item.productoId,
-          productoNombre: s.item.nombre,
-          tipo: "salida_venta",
-          cantidad: s.item.cantidad,
-          stockResultante: s.nuevo,
-          sede: sedeActiva,
-          usuarioNombre: user?.displayName || "Sin nombre",
-          referencia: `Venta ${refVenta.id.slice(0, 6)}`,
-          origen: "venta",
-        });
+      // Los movimientos auxiliares se registran después de confirmar la venta.
+      // Si alguno falla, la venta y el stock ya quedaron guardados juntos.
+      const resultadosMovimientos = await Promise.allSettled(
+        stocksFinales.map((s) =>
+          Promise.resolve().then(() =>
+            registrarMovimiento({
+              productoId: s.item.productoId,
+              productoNombre: s.item.nombre,
+              tipo: "salida_venta",
+              cantidad: s.item.cantidad,
+              stockResultante: s.nuevo,
+              sede: sedeActiva,
+              usuarioNombre: user?.displayName || "Sin nombre",
+              referencia: `Venta ${refVenta.id.slice(0, 6)}`,
+              origen: "venta",
+            })
+          )
+        )
+      );
+      if (resultadosMovimientos.some((r) => r.status === "rejected")) {
+        console.warn("Venta registrada, pero algún movimiento auxiliar no se pudo guardar.");
       }
 
-      revisarCentinela();
+      try {
+        await revisarCentinela();
+      } catch (errorCentinela) {
+        console.warn("La venta se registró, pero falló la revisión de alertas:", errorCentinela);
+      }
+
       setCarrito([]);
       setMetodo("efectivo");
       setReferencia("");
@@ -246,6 +276,7 @@ const NewSalePage = () => {
         error: false,
       });
     } catch (e) {
+      console.error("Error registrando venta:", e);
       setSnack({ open: true, mensaje: e.message || "Error registrando la venta.", error: true });
     } finally {
       setGuardando(false);
