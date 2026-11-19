@@ -192,6 +192,82 @@ const InventoryPage = () => {
     return opciones[hash % opciones.length];
   };
 
+  // Precios exclusivamente ilustrativos para la evaluación académica.
+  // Se calculan de manera estable a partir del producto y NO son cotizaciones reales.
+  const calcularPrecioDemo = (producto) => {
+    const nombre = (producto.nombre || "").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const clave = `${producto.codigo || ""}|${producto.nombre || ""}`;
+    let hash = 0;
+    for (let i = 0; i < clave.length; i++) {
+      hash = (hash * 31 + clave.charCodeAt(i)) >>> 0;
+    }
+
+    let opciones;
+    if (/TORNILLO|TUERCA|ARANDELA|CLAVO|CHAZO|TACO|ABRAZADERA|GRAPA|REMACHE/.test(nombre)) {
+      opciones = [300, 500, 700, 900, 1200, 1500, 2000, 2500];
+    } else if (/CABLE|ALAMBRE|CONDUIT|TUBO|CANALETA|MANGUERA/.test(nombre)) {
+      opciones = [2500, 3500, 4500, 5500, 7000, 9500, 12000, 16000];
+    } else if (/ACEITE|LUBRICANTE|AFLOJATODO|SILICONA|PEGANTE|SELLANTE|AEROSOL/.test(nombre)) {
+      opciones = [5500, 7500, 9000, 11500, 13500, 16000, 19500, 23000];
+    } else if (/MARTILLO|TALADRO|SIERRA|ALICATE|DESTORNILLADOR|PULIDORA|LLAVE |BROCA|HERRAMIENTA/.test(nombre)) {
+      opciones = [8500, 12000, 17500, 25000, 35000, 45000, 65000, 95000];
+    } else if (/BOMBILLO|LAMPARA|LUZ |LED|INTERRUPTOR|TOMACORRIENTE|TOMA |PLACA|SOQUETE/.test(nombre)) {
+      opciones = [4500, 6500, 8500, 12000, 16000, 22000, 30000, 40000];
+    } else if (/BISAGRA|CERRADURA|CANDADO|PASADOR|MANIJA/.test(nombre)) {
+      opciones = [2500, 4500, 6500, 9500, 14500, 19500, 28000, 39000];
+    } else if (/PINTURA|ESMALTE|BROCHA|RODILLO|LIJA|THINNER/.test(nombre)) {
+      opciones = [2000, 3500, 5500, 8500, 12500, 18500, 26000, 35000];
+    } else if (/CINTA|AISLANTE|TEFLON|CINTURON/.test(nombre)) {
+      opciones = [2000, 3000, 4000, 5000, 6500, 8000, 10500, 13500];
+    } else {
+      opciones = [2500, 3500, 5000, 6500, 8000, 10500, 14000, 18500, 24000];
+    }
+    return opciones[hash % opciones.length];
+  };
+
+  // Actualizar SOLO precios genéricos ($0 o $1.000) en la base de PRUEBAS.
+  // Esta operación no modifica existencias, mínimos ni precios ya personalizados.
+  const actualizarPreciosDemo = async () => {
+    const proyecto = db.app.options.projectId;
+    if (proyecto !== "ferreteria-43b53") {
+      setMensajeDemo(`ACTUALIZACIÓN BLOQUEADA: proyecto Firebase inesperado (${proyecto}).`);
+      return;
+    }
+    const candidatos = productos.filter((p) => p.precio === 0 || p.precio === 1000);
+    if (!candidatos.length) {
+      setMensajeDemo("No quedan productos con precios genéricos de $0 o $1.000.");
+      return;
+    }
+    if (!window.confirm(
+      `PROYECTO DE PRUEBAS: ${proyecto}\n\n` +
+      `Se asignarán precios SIMULADOS a ${candidatos.length} productos cuyo precio sea $0 o $1.000.\n` +
+      `Los demás precios se conservarán; no se cambiarán nombres, existencias ni mínimos.\n\n` +
+      `Los precios calculados NO representan valores comerciales reales. No existe deshacer automático. ¿Continuar?`
+    )) return;
+
+    setCargandoDemo(true);
+    setMensajeDemo("Actualizando precios ficticios de demostración...");
+    let completados = 0;
+    try {
+      for (let inicio = 0; inicio < candidatos.length; inicio += 200) {
+        const lote = writeBatch(db);
+        const grupo = candidatos.slice(inicio, inicio + 200);
+        grupo.forEach((p) => {
+          lote.update(doc(db, "productos", p.id), { precio: calcularPrecioDemo(p) });
+        });
+        await lote.commit();
+        completados += grupo.length;
+        setMensajeDemo(`Precios ficticios actualizados: ${completados} de ${candidatos.length}...`);
+      }
+      setMensajeDemo(`Listo: ${completados} productos recibieron precios de demostración diferentes. Las existencias y mínimos no cambiaron.`);
+    } catch (error) {
+      console.error("Error asignando precios demo:", error);
+      setMensajeDemo(`La actualización se detuvo tras ${completados} productos. Consulta los datos antes de repetir. ${error.message}`);
+    } finally {
+      setCargandoDemo(false);
+    }
+  };
+
   // Prepara la demostración SOLO en el proyecto de Firebase de pruebas.
   // Ajusta mínimos de todos los productos y da stock a los que tienen ambas sedes en cero.
   const cargarStockDemo = async () => {
@@ -492,6 +568,9 @@ const InventoryPage = () => {
             </Button>
             <Button variant="outlined" disabled={cargandoDemo || cargando} onClick={cargarStockDemo}>
               {cargandoDemo ? "Cargando datos..." : "Preparar inventario demo"}
+            </Button>
+            <Button variant="outlined" disabled={cargandoDemo || cargando} onClick={actualizarPreciosDemo}>
+              {cargandoDemo ? "Actualizando..." : "Actualizar precios demo"}
             </Button>
             <Button variant="contained" startIcon={<AddOutlinedIcon />} onClick={abrirNuevo} sx={{ backgroundColor: "black" }}>
               Nuevo producto
