@@ -164,8 +164,36 @@ const InventoryPage = () => {
     }
   };
 
-  // CARGA ÚNICA DE DATOS DE DEMOSTRACIÓN.
-  // El bloqueo por projectId evita ejecutarla accidentalmente en producción.
+  // Mínimos de demostración: reglas orientativas por tipo de producto,
+  // con variación estable según su código/nombre. No son mínimos reales.
+  const calcularMinimoDemo = (producto) => {
+    const nombre = (producto.nombre || "").toUpperCase();
+    const categoria = (producto.categoria || "").toUpperCase();
+    const clave = `${producto.codigo || ""}|${nombre}|${categoria}`;
+    let hash = 0;
+    for (let i = 0; i < clave.length; i++) {
+      hash = (hash * 31 + clave.charCodeAt(i)) >>> 0;
+    }
+
+    let opciones;
+    if (/TORNILLO|TUERCA|ARANDELA|CLAVO|CHAZO|TACO|ABRAZADERA|GRAPA|CINTA AISLANTE/.test(nombre)) {
+      opciones = [15, 20, 25, 30, 40];
+    } else if (/CABLE|ALAMBRE|TUBO|CANALETA|CONDUIT|MANGUERA/.test(nombre)) {
+      opciones = [10, 15, 20, 25];
+    } else if (/BOMBILLO|LAMPARA|LÁMPARA|LUZ |LED|INTERRUPTOR|TOMACORRIENTE|TOMA |PLACA/.test(nombre)) {
+      opciones = [6, 8, 10, 12, 15];
+    } else if (/ACEITE|LUBRICANTE|SILICONA|PEGANTE|SELLANTE|PINTURA|AEROSOL/.test(nombre)) {
+      opciones = [4, 5, 6, 8, 10];
+    } else if (/MARTILLO|TALADRO|SIERRA|ALICATE|DESTORNILLADOR|LLAVE |HERRAMIENTA/.test(nombre)) {
+      opciones = [2, 3, 4, 5, 6];
+    } else {
+      opciones = [4, 5, 6, 8, 10, 12, 15];
+    }
+    return opciones[hash % opciones.length];
+  };
+
+  // Prepara la demostración SOLO en el proyecto de Firebase de pruebas.
+  // Ajusta mínimos de todos los productos y da stock a los que tienen ambas sedes en cero.
   const cargarStockDemo = async () => {
     const proyecto = db.app.options.projectId;
     if (proyecto !== "ferreteria-43b53") {
@@ -173,50 +201,67 @@ const InventoryPage = () => {
       return;
     }
 
-    const pendientes = productos.filter((p) => p.stockSede1 === 0 && p.stockSede2 === 0);
-    if (pendientes.length === 0) {
-      setMensajeDemo("No hay productos con ambas sedes en cero. No se modificó nada.");
+    if (productos.length === 0) {
+      setMensajeDemo("Todavía no hay productos cargados para preparar la demostración.");
       return;
     }
 
+    const sinStock = productos.filter((p) => p.stockSede1 === 0 && p.stockSede2 === 0).length;
     const confirmado = window.confirm(
-      `Estás en Firebase ${proyecto}. Se cargarán cantidades FICTICIAS en ${pendientes.length} productos que tienen ambas sedes en cero. No se cambiarán los demás productos, precios ni nombres. Esta operación modifica Firestore y no tiene deshacer automático. ¿Continuar?`
+      `PROYECTO DE PRUEBAS: ${proyecto}\n\n` +
+      `Se configurarán mínimos FICTICIOS para ${productos.length} productos según su tipo.\n` +
+      `Se cargará stock en los ${sinStock} productos que tengan ambas sedes en cero.\n` +
+      `Los demás stocks, nombres, precios y categorías se conservarán.\n\n` +
+      `Los mínimos anteriores serán reemplazados. No hay deshacer automático. ¿Continuar?`
     );
     if (!confirmado) return;
 
     setCargandoDemo(true);
-    setMensajeDemo("Preparando stock de demostración...");
+    setMensajeDemo("Preparando inventario de demostración...");
     let completados = 0;
     try {
-      // Lotes moderados, sin superar el límite de escritura por lote de Firestore.
-      for (let inicio = 0; inicio < pendientes.length; inicio += 200) {
-        const lote = writeBatch(db);
-        const grupo = pendientes.slice(inicio, inicio + 200);
-        grupo.forEach((p, posicion) => {
-          const indice = inicio + posicion;
-          const minimo = Math.max(0, Number(p.minimo) || 0);
-          // Casos para demostrar tres estados: normal, bajo Sede 1 y bajo Sede 2.
-          // Las cantidades dependen del índice de forma reproducible y son ficticias.
+      const cambios = productos.map((p, indice) => {
+        const minimo = calcularMinimoDemo(p);
+        const actualizaciones = {};
+        if (p.minimo !== minimo) actualizaciones.stockMinimo = minimo;
+
+        if (p.stockSede1 === 0 && p.stockSede2 === 0) {
           let sede1 = minimo + 15 + (indice % 30);
           let sede2 = minimo + 8 + (indice % 20);
-          if (minimo > 0 && indice % 7 === 0) {
+          // Unos pocos productos quedan con alerta por stock total bajo.
+          if (indice % 7 === 0) {
+            sede1 = Math.floor(minimo / 2);
+            sede2 = Math.max(0, minimo - sede1 - 1);
+          } else if (indice % 7 === 1) {
             sede1 = Math.max(0, minimo - 1);
-            sede2 = Math.max(0, minimo - 1);
-          } else if (minimo > 0 && indice % 7 === 1) {
-            sede1 = Math.max(0, minimo - 1);
-          } else if (minimo > 0 && indice % 7 === 2) {
+          } else if (indice % 7 === 2) {
             sede2 = Math.max(0, minimo - 1);
           }
-          lote.update(doc(db, "productos", p.id), { stockSede1: sede1, stockSede2: sede2 });
+          actualizaciones.stockSede1 = sede1;
+          actualizaciones.stockSede2 = sede2;
+        }
+        return { id: p.id, actualizaciones };
+      }).filter(({ actualizaciones }) => Object.keys(actualizaciones).length > 0);
+
+      if (cambios.length === 0) {
+        setMensajeDemo("Todos los mínimos ya coinciden con los valores demo y no hay productos vacíos.");
+        return;
+      }
+
+      for (let inicio = 0; inicio < cambios.length; inicio += 200) {
+        const lote = writeBatch(db);
+        const grupo = cambios.slice(inicio, inicio + 200);
+        grupo.forEach(({ id, actualizaciones }) => {
+          lote.update(doc(db, "productos", id), actualizaciones);
         });
         await lote.commit();
         completados += grupo.length;
-        setMensajeDemo(`Stock demo guardado: ${completados} de ${pendientes.length} productos.`);
+        setMensajeDemo(`Preparados ${completados} de ${cambios.length} productos...`);
       }
-      setMensajeDemo(`Listo: ${completados} productos recibieron existencias ficticias en ambas sedes. Los productos que ya tenían stock se conservaron.`);
+      setMensajeDemo(`Listo: se prepararon ${completados} productos. Mínimos variados por tipo de artículo y stock ficticio solamente donde ambas sedes estaban en cero.`);
     } catch (error) {
-      console.error("Error cargando stock demo:", error);
-      setMensajeDemo(`Error después de actualizar ${completados} productos. No vuelvas a pulsar el botón hasta revisar Firestore. Detalle: ${error.message}`);
+      console.error("Error preparando inventario demo:", error);
+      setMensajeDemo(`Error tras guardar ${completados} documentos. Revisa Firestore antes de repetir. Detalle: ${error.message}`);
     } finally {
       setCargandoDemo(false);
     }
@@ -446,7 +491,7 @@ const InventoryPage = () => {
               📸 Escanear factura
             </Button>
             <Button variant="outlined" disabled={cargandoDemo || cargando} onClick={cargarStockDemo}>
-              {cargandoDemo ? "Cargando datos..." : "Cargar stock demo"}
+              {cargandoDemo ? "Cargando datos..." : "Preparar inventario demo"}
             </Button>
             <Button variant="contained" startIcon={<AddOutlinedIcon />} onClick={abrirNuevo} sx={{ backgroundColor: "black" }}>
               Nuevo producto
