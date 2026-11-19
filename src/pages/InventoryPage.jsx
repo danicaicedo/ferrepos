@@ -31,16 +31,15 @@ import { revisarCentinela } from "../centinela";
 import EditOutlinedIcon from "@mui/icons-material/Edit";
 import SearchOutlinedIcon from "@mui/icons-material/Search";
 import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
-import { collection, onSnapshot, addDoc, updateDoc, doc } from "firebase/firestore";
+import { collection, onSnapshot, addDoc, updateDoc, doc, increment } from "firebase/firestore";
 import { db } from "../firebase";
-import { asegurarProductosIniciales } from "../seedProductos";
 import Animate from "../components/common/Animate";
 import OCRDialog from "../components/OCRDialog";
 import { GROQ_API_KEY } from "../config"; // ⚠️ IMPORTANTE: Asegúrate de que esta línea esté aquí
 
 const cop = (n) => "$" + Number(n).toLocaleString("es-CO");
 
-const FORM_VACIO = { nombre: "", categoria: "", precio: "", stock: "", minimo: "" };
+const FORM_VACIO = { nombre: "", categoria: "", precio: "", stockSede1: "", stockSede2: "", minimo: "" };
 
 const InventoryPage = () => {
   const [productos, setProductos] = useState([]);
@@ -50,6 +49,8 @@ const InventoryPage = () => {
   const [ocrDialogOpen, setOcrDialogOpen] = useState(false);
   const [editando, setEditando] = useState(null);
   const [form, setForm] = useState(FORM_VACIO);
+  const [guardandoProducto, setGuardandoProducto] = useState(false);
+  const [errorProducto, setErrorProducto] = useState("");
   
   const [pendientesRevision, setPendientesRevision] = useState([]);
   const [revisionOpen, setRevisionOpen] = useState(false);
@@ -58,18 +59,17 @@ const InventoryPage = () => {
   const productosPorPagina = 50;
 
   useEffect(() => {
-    asegurarProductosIniciales();
     revisarCentinela(); 
     const unsub = onSnapshot(collection(db, "productos"), (s) => {
       const lista = s.docs.map((d) => {
         const data = d.data();
         return {
           id: d.id,
-          nombre: data.nombre,
+          nombre: data.nombre || "Sin nombre",
           categoria: data.categoria || "General",
           precio: Number(data.precio) || 0,
           stock: (Number(data.stockSede1) || 0) + (Number(data.stockSede2) || 0),
-          minimo: Number(data.stockMinimo) || 5,
+          minimo: Number(data.stockMinimo ?? 5),
           codigo: data.codigo,
           stockSede1: Number(data.stockSede1) || 0,
           stockSede2: Number(data.stockSede2) || 0,
@@ -93,32 +93,73 @@ const InventoryPage = () => {
 
   useEffect(() => { setPaginaActual(1); }, [busqueda]);
 
-  const abrirNuevo = () => { setEditando(null); setForm(FORM_VACIO); setDialogOpen(true); };
+  const abrirNuevo = () => {
+    setEditando(null);
+    setForm(FORM_VACIO);
+    setErrorProducto("");
+    setDialogOpen(true);
+  };
+
   const abrirEdicion = (p) => {
     setEditando(p);
-    setForm({ nombre: p.nombre, categoria: p.categoria, precio: String(p.precio), stock: String(p.stock), minimo: String(p.minimo) });
+    setErrorProducto("");
+    setForm({
+      nombre: p.nombre,
+      categoria: p.categoria,
+      precio: String(p.precio),
+      stockSede1: String(p.stockSede1),
+      stockSede2: String(p.stockSede2),
+      minimo: String(p.minimo),
+    });
     setDialogOpen(true);
   };
 
   const guardar = async () => {
-    if (!form.nombre.trim() || !form.precio) return;
+    const precio = Number(form.precio);
+    const stockSede1 = Number(form.stockSede1);
+    const stockSede2 = Number(form.stockSede2);
+    const stockMinimo = Number(form.minimo);
+
+    if (!form.nombre.trim() || form.precio === "" || form.stockSede1 === "" ||
+        form.stockSede2 === "" || form.minimo === "" ||
+        ![precio, stockSede1, stockSede2, stockMinimo].every(Number.isFinite) ||
+        precio < 0 || [stockSede1, stockSede2, stockMinimo].some(
+          (valor) => !Number.isInteger(valor) || valor < 0
+        )) {
+      setErrorProducto("Completa los campos con valores válidos. Las existencias y el mínimo deben ser enteros no negativos.");
+      return;
+    }
+
     const data = {
       nombre: form.nombre.trim(),
       categoria: form.categoria.trim() || "General",
-      precio: Number(form.precio) || 0,
-      stockSede1: Number(form.stock) || 0,
-      stockSede2: 0,
-      stockMinimo: Number(form.minimo) || 5,
+      precio,
+      stockSede1,
+      stockSede2,
+      stockMinimo,
     };
+
+    setGuardandoProducto(true);
+    setErrorProducto("");
     try {
       if (editando) {
         await updateDoc(doc(db, "productos", editando.id), data);
       } else {
-        await addDoc(collection(db, "productos"), { ...data, codigo: editando?.codigo || `PROD-${Date.now()}`, unidad: "UN", fechaCreacion: new Date() });
+        await addDoc(collection(db, "productos"), {
+          ...data,
+          codigo: `PROD-${Date.now()}`,
+          unidad: "UN",
+          fechaCreacion: new Date(),
+        });
       }
       revisarCentinela();
       setDialogOpen(false);
-    } catch (e) { console.error("Error guardando producto:", e); }
+    } catch (e) {
+      console.error("Error guardando producto:", e);
+      setErrorProducto(`No se pudo guardar el producto: ${e.message}`);
+    } finally {
+      setGuardandoProducto(false);
+    }
   };
 
   //  PROCESAR FACTURA ESCANEADA CON GROQ (INTELIGENCIA REAL)
@@ -130,7 +171,34 @@ const InventoryPage = () => {
 
     for (const producto of productosDetectados) {
       const { nombre, cantidad, precio, sede1, sede2 } = producto;
-      const totalUnidades = (sede1 || 0) + (sede2 || 0) || cantidad;
+      const tieneReparto = sede1 !== undefined || sede2 !== undefined;
+      const unidadesSede1 = tieneReparto ? Number(sede1 ?? 0) : Number(cantidad ?? 0);
+      const unidadesSede2 = tieneReparto ? Number(sede2 ?? 0) : 0;
+      const totalUnidades = unidadesSede1 + unidadesSede2;
+      const repartoValido = [unidadesSede1, unidadesSede2].every(
+        (valor) => Number.isInteger(valor) && valor >= 0
+      ) && totalUnidades > 0;
+
+      if (!nombre || !repartoValido ||
+          (tieneReparto && Number(cantidad) > 0 && totalUnidades !== Number(cantidad))) {
+        noEncontrados.push({
+          nombreOCR: nombre || "Producto sin nombre",
+          cantidad: Number(cantidad) || totalUnidades || 0,
+          precio: Number(precio) || 0,
+          sede1: unidadesSede1,
+          sede2: unidadesSede2,
+          errorReparto: true,
+        });
+        continue;
+      }
+
+      const pendiente = {
+        nombreOCR: nombre,
+        cantidad: totalUnidades,
+        precio: Number(precio) || 0,
+        sede1: unidadesSede1,
+        sede2: unidadesSede2,
+      };
 
       console.log(`\n🔍 Buscando: "${nombre}"`);
       
@@ -140,10 +208,10 @@ const InventoryPage = () => {
       
       if (productoExistente) {
         console.log(`✅ Coincidencia EXACTA encontrada: ${productoExistente.nombre}`);
-        const nuevoStockSede1 = productoExistente.stockSede1 + totalUnidades;
         await updateDoc(doc(db, "productos", productoExistente.id), {
-          stockSede1: nuevoStockSede1,
-          precio: precio || productoExistente.precio,
+          stockSede1: increment(unidadesSede1),
+          stockSede2: increment(unidadesSede2),
+          precio: Number(precio) > 0 ? Number(precio) : productoExistente.precio,
         });
         productosVinculados.push(`${nombre} -> ${productoExistente.nombre}`);
         continue;
@@ -163,7 +231,7 @@ const InventoryPage = () => {
       
       if (candidatos.length === 0) {
         console.log("❌ No hay candidatos. Agregando a revisión manual.");
-        noEncontrados.push({ nombreOCR: nombre, cantidad: totalUnidades, precio: precio || 0 });
+        noEncontrados.push(pendiente);
         continue;
       }
       
@@ -202,26 +270,26 @@ const InventoryPage = () => {
         console.log(`🤖 Groq respondió: "${respuestaGroq}"`);
         
         if (respuestaGroq === "NO_ENCONTRADO" || !respuestaGroq || isNaN(parseInt(respuestaGroq))) {
-          noEncontrados.push({ nombreOCR: nombre, cantidad: totalUnidades, precio: precio || 0 });
+          noEncontrados.push(pendiente);
         } else {
           const indice = parseInt(respuestaGroq) - 1;
           if (indice >= 0 && indice < candidatos.length) {
             productoExistente = candidatos[indice];
             console.log(`✅ Groq seleccionó: ${productoExistente.nombre}`);
             
-            const nuevoStockSede1 = productoExistente.stockSede1 + totalUnidades;
             await updateDoc(doc(db, "productos", productoExistente.id), {
-              stockSede1: nuevoStockSede1,
-              precio: precio || productoExistente.precio,
+              stockSede1: increment(unidadesSede1),
+              stockSede2: increment(unidadesSede2),
+              precio: Number(precio) > 0 ? Number(precio) : productoExistente.precio,
             });
             productosVinculados.push(`${nombre} -> ${productoExistente.nombre}`);
           } else {
-            noEncontrados.push({ nombreOCR: nombre, cantidad: totalUnidades, precio: precio || 0 });
+            noEncontrados.push(pendiente);
           }
         }
       } catch (e) {
         console.error(" Error con Groq:", e);
-        noEncontrados.push({ nombreOCR: nombre, cantidad: totalUnidades, precio: precio || 0 });
+        noEncontrados.push(pendiente);
       }
     }
 
@@ -241,45 +309,48 @@ const InventoryPage = () => {
     }
   };
 
-  // 🟢 ARREGLO 2: Confirmación final al terminar la revisión manual
+  // Vincular el producto a un registro existente o crearlo después de la revisión.
   const guardarRevisionManual = async (pendiente, productoRealId, esNuevo) => {
+    const s1 = Number(pendiente.sede1);
+    const s2 = Number(pendiente.sede2);
+    if (![s1, s2].every((n) => Number.isInteger(n) && n >= 0) || s1 + s2 <= 0 ||
+        (Number(pendiente.cantidad) > 0 && s1 + s2 !== Number(pendiente.cantidad))) {
+      alert("Revisa el reparto: la suma de las sedes debe coincidir con la cantidad de la factura.");
+      return;
+    }
+
     try {
       if (esNuevo) {
         await addDoc(collection(db, "productos"), {
           nombre: pendiente.nombreOCR,
           categoria: "General",
           precio: pendiente.precio,
-          stockSede1: pendiente.cantidad,
-          stockSede2: 0,
+          stockSede1: s1,
+          stockSede2: s2,
           stockMinimo: 5,
           codigo: `PROD-${Date.now()}`,
           unidad: "UN",
           fechaCreacion: new Date(),
         });
-        console.log(`✅ Producto CREADO: ${pendiente.nombreOCR}`);
       } else {
-        const prodReal = productos.find(p => p.id === productoRealId);
-        if (prodReal) {
-          await updateDoc(doc(db, "productos", prodReal.id), {
-            stockSede1: prodReal.stockSede1 + pendiente.cantidad,
-            precio: pendiente.precio || prodReal.precio,
-          });
-          console.log(`✅ Producto ACTUALIZADO: ${prodReal.nombre} (+${pendiente.cantidad} unidades)`);
-        }
+        const prodReal = productos.find((p) => p.id === productoRealId);
+        if (!prodReal) throw new Error("No se encontró el producto seleccionado.");
+        await updateDoc(doc(db, "productos", prodReal.id), {
+          stockSede1: increment(s1),
+          stockSede2: increment(s2),
+          precio: pendiente.precio > 0 ? pendiente.precio : prodReal.precio,
+        });
       }
-      
-      // Quitar de la lista de pendientes
-      const nuevosPendientes = pendientesRevision.filter(p => p.nombreOCR !== pendiente.nombreOCR);
+
+      const nuevosPendientes = pendientesRevision.filter((p) => p !== pendiente);
       setPendientesRevision(nuevosPendientes);
-      
-      // Si ya no quedan pendientes, cerrar el diálogo y mostrar confirmación final
       if (nuevosPendientes.length === 0) {
         setRevisionOpen(false);
-        alert("✅ ¡Listo! Todos los productos fueron procesados correctamente.");
+        alert("Productos revisados y guardados correctamente.");
       }
-    } catch (e) { 
+    } catch (e) {
       console.error("Error en revisión manual:", e);
-      alert("❌ Error al guardar: " + e.message);
+      alert("Error al guardar: " + e.message);
     }
   };
 
@@ -357,12 +428,16 @@ const InventoryPage = () => {
             <TextField label="Nombre" fullWidth value={form.nombre} onChange={(e) => setForm({ ...form, nombre: e.target.value })} />
             <TextField label="Categoría" fullWidth value={form.categoria} onChange={(e) => setForm({ ...form, categoria: e.target.value })} />
             <TextField label="Precio (COP)" type="number" fullWidth value={form.precio} onChange={(e) => setForm({ ...form, precio: e.target.value })} />
-            <TextField label="Stock actual" type="number" fullWidth value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} />
-            <TextField label="Stock mínimo" type="number" fullWidth value={form.minimo} onChange={(e) => setForm({ ...form, minimo: e.target.value })} />
+            <TextField label="Stock Sede Principal" type="number" fullWidth inputProps={{ min: 0, step: 1 }} value={form.stockSede1} onChange={(e) => setForm({ ...form, stockSede1: e.target.value })} />
+            <TextField label="Stock Sede 2" type="number" fullWidth inputProps={{ min: 0, step: 1 }} value={form.stockSede2} onChange={(e) => setForm({ ...form, stockSede2: e.target.value })} />
+            <TextField label="Stock mínimo" type="number" fullWidth inputProps={{ min: 0, step: 1 }} value={form.minimo} onChange={(e) => setForm({ ...form, minimo: e.target.value })} />
+            {errorProducto && <Alert severity="error">{errorProducto}</Alert>}
           </DialogContent>
           <DialogActions sx={{ p: 2 }}>
             <Button onClick={() => setDialogOpen(false)}>Cancelar</Button>
-            <Button variant="contained" sx={{ backgroundColor: "black" }} onClick={guardar}>Guardar</Button>
+            <Button variant="contained" sx={{ backgroundColor: "black" }} disabled={guardandoProducto} onClick={guardar}>
+              {guardandoProducto ? "Guardando..." : "Guardar"}
+            </Button>
           </DialogActions>
         </Dialog>
 
@@ -383,6 +458,21 @@ const InventoryPage = () => {
                   <Typography variant="subtitle1" fontWeight={700}>
                     📄 Leído en factura: "{pendiente.nombreOCR}" (Cant: {pendiente.cantidad})
                   </Typography>
+                  <Box sx={{ display: 'flex', gap: 2, mt: 1, flexWrap: 'wrap' }}>
+                    <TextField size="small" type="number" label="Sede Principal" inputProps={{ min: 0, step: 1 }}
+                      value={pendiente.sede1}
+                      onChange={(e) => setPendientesRevision((actuales) => actuales.map((p) =>
+                        p === pendiente ? { ...p, sede1: e.target.value } : p
+                      ))} />
+                    <TextField size="small" type="number" label="Sede 2" inputProps={{ min: 0, step: 1 }}
+                      value={pendiente.sede2}
+                      onChange={(e) => setPendientesRevision((actuales) => actuales.map((p) =>
+                        p === pendiente ? { ...p, sede2: e.target.value } : p
+                      ))} />
+                    <Typography variant="caption" sx={{ alignSelf: 'center' }}>
+                      Repartir {pendiente.cantidad} unidades entre ambas sedes
+                    </Typography>
+                  </Box>
                   <Box sx={{ display: 'flex', gap: 2, mt: 1, alignItems: 'center' }}>
                     <FormControl sx={{ minWidth: 300 }} size="small">
                       <InputLabel>Selecciona producto real o crea nuevo</InputLabel>
