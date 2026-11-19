@@ -31,7 +31,7 @@ import { revisarCentinela } from "../centinela";
 import EditOutlinedIcon from "@mui/icons-material/Edit";
 import SearchOutlinedIcon from "@mui/icons-material/Search";
 import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
-import { collection, onSnapshot, addDoc, updateDoc, doc, increment } from "firebase/firestore";
+import { collection, onSnapshot, addDoc, updateDoc, doc, increment, writeBatch } from "firebase/firestore";
 import { db } from "../firebase";
 import Animate from "../components/common/Animate";
 import OCRDialog from "../components/OCRDialog";
@@ -50,6 +50,8 @@ const InventoryPage = () => {
   const [editando, setEditando] = useState(null);
   const [form, setForm] = useState(FORM_VACIO);
   const [guardandoProducto, setGuardandoProducto] = useState(false);
+  const [cargandoDemo, setCargandoDemo] = useState(false);
+  const [mensajeDemo, setMensajeDemo] = useState("");
   const [errorProducto, setErrorProducto] = useState("");
   
   const [pendientesRevision, setPendientesRevision] = useState([]);
@@ -159,6 +161,64 @@ const InventoryPage = () => {
       setErrorProducto(`No se pudo guardar el producto: ${e.message}`);
     } finally {
       setGuardandoProducto(false);
+    }
+  };
+
+  // CARGA ÚNICA DE DATOS DE DEMOSTRACIÓN.
+  // El bloqueo por projectId evita ejecutarla accidentalmente en producción.
+  const cargarStockDemo = async () => {
+    const proyecto = db.app.options.projectId;
+    if (proyecto !== "ferreteria-43b53") {
+      setMensajeDemo(`CARGA BLOQUEADA: Firebase apunta a ${proyecto}, no al proyecto de pruebas.`);
+      return;
+    }
+
+    const pendientes = productos.filter((p) => p.stockSede1 === 0 && p.stockSede2 === 0);
+    if (pendientes.length === 0) {
+      setMensajeDemo("No hay productos con ambas sedes en cero. No se modificó nada.");
+      return;
+    }
+
+    const confirmado = window.confirm(
+      `Estás en Firebase ${proyecto}. Se cargarán cantidades FICTICIAS en ${pendientes.length} productos que tienen ambas sedes en cero. No se cambiarán los demás productos, precios ni nombres. Esta operación modifica Firestore y no tiene deshacer automático. ¿Continuar?`
+    );
+    if (!confirmado) return;
+
+    setCargandoDemo(true);
+    setMensajeDemo("Preparando stock de demostración...");
+    let completados = 0;
+    try {
+      // Lotes moderados, sin superar el límite de escritura por lote de Firestore.
+      for (let inicio = 0; inicio < pendientes.length; inicio += 200) {
+        const lote = writeBatch(db);
+        const grupo = pendientes.slice(inicio, inicio + 200);
+        grupo.forEach((p, posicion) => {
+          const indice = inicio + posicion;
+          const minimo = Math.max(0, Number(p.minimo) || 0);
+          // Casos para demostrar tres estados: normal, bajo Sede 1 y bajo Sede 2.
+          // Las cantidades dependen del índice de forma reproducible y son ficticias.
+          let sede1 = minimo + 15 + (indice % 30);
+          let sede2 = minimo + 8 + (indice % 20);
+          if (minimo > 0 && indice % 7 === 0) {
+            sede1 = Math.max(0, minimo - 1);
+            sede2 = Math.max(0, minimo - 1);
+          } else if (minimo > 0 && indice % 7 === 1) {
+            sede1 = Math.max(0, minimo - 1);
+          } else if (minimo > 0 && indice % 7 === 2) {
+            sede2 = Math.max(0, minimo - 1);
+          }
+          lote.update(doc(db, "productos", p.id), { stockSede1: sede1, stockSede2: sede2 });
+        });
+        await lote.commit();
+        completados += grupo.length;
+        setMensajeDemo(`Stock demo guardado: ${completados} de ${pendientes.length} productos.`);
+      }
+      setMensajeDemo(`Listo: ${completados} productos recibieron existencias ficticias en ambas sedes. Los productos que ya tenían stock se conservaron.`);
+    } catch (error) {
+      console.error("Error cargando stock demo:", error);
+      setMensajeDemo(`Error después de actualizar ${completados} productos. No vuelvas a pulsar el botón hasta revisar Firestore. Detalle: ${error.message}`);
+    } finally {
+      setCargandoDemo(false);
     }
   };
 
@@ -385,11 +445,16 @@ const InventoryPage = () => {
               sx={{ borderColor: "black", color: "black", "&:hover": { borderColor: "black", backgroundColor: "rgba(0,0,0,0.04)" } }}>
               📸 Escanear factura
             </Button>
+            <Button variant="outlined" disabled={cargandoDemo || cargando} onClick={cargarStockDemo}>
+              {cargandoDemo ? "Cargando datos..." : "Cargar stock demo"}
+            </Button>
             <Button variant="contained" startIcon={<AddOutlinedIcon />} onClick={abrirNuevo} sx={{ backgroundColor: "black" }}>
               Nuevo producto
             </Button>
           </Box>
         </Box>
+
+        {mensajeDemo && <Alert severity="info" sx={{ mb: 2 }} onClose={() => setMensajeDemo("")}>{mensajeDemo}</Alert>}
 
         <TableContainer component={Paper}>
           <Table size="small">
