@@ -37,6 +37,7 @@ import { useSede } from "../context/SedeContext";
 import Animate from "../components/common/Animate";
 
 const cop = (n) => "$" + Number(n).toLocaleString("es-CO");
+
 const fmtFecha = (iso) =>
   new Date(iso).toLocaleString("es-CO", {
     day: "2-digit",
@@ -45,7 +46,10 @@ const fmtFecha = (iso) =>
     hour: "2-digit",
     minute: "2-digit",
   });
+
 const pagosDe = (v) => v.pagos || [{ metodo: "efectivo", monto: v.total }];
+const precioDe = (item) => Number(item.precioCobrado ?? item.precio ?? item.precioBase ?? 0);
+const subtotalDe = (item) => item.subtotal ?? Number(item.cantidad) * precioDe(item);
 
 const ETIQUETAS_PERIODO = {
   hoy: "Hoy",
@@ -56,6 +60,7 @@ const ETIQUETAS_PERIODO = {
 
 const ReportsPage = () => {
   const { sedeActiva } = useSede();
+
   const user = useMemo(() => {
     try {
       return JSON.parse(localStorage.getItem("user") || "null");
@@ -63,6 +68,7 @@ const ReportsPage = () => {
       return null;
     }
   }, []);
+
   const esAdmin = user?.rol === "admin";
 
   const [ventas, setVentas] = useState([]);
@@ -74,14 +80,45 @@ const ReportsPage = () => {
   const [ventaAbierta, setVentaAbierta] = useState(null);
 
   useEffect(() => {
-    const unsubV = onSnapshot(collection(db, "sales"), (snap) => {
-      setVentas(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-    });
+    const colecciones = ["sales", "ventas"];
+    const porColeccion = new Map();
+
+    const actualizarVentas = () => {
+      const porId = new Map();
+
+      for (const nombre of colecciones) {
+        for (const venta of porColeccion.get(nombre) || []) {
+          porId.set(venta.id, venta);
+        }
+      }
+
+      setVentas([...porId.values()]);
+    };
+
+    const cancelarVentas = colecciones.map((nombre) =>
+      onSnapshot(
+        collection(db, nombre),
+        (snap) => {
+          porColeccion.set(
+            nombre,
+            snap.docs.map((d) => ({ ...d.data(), id: d.id }))
+          );
+          actualizarVentas();
+        },
+        (error) => {
+          porColeccion.delete(nombre);
+          actualizarVentas();
+          console.warn(`No se pudieron cargar los reportes de ${nombre}.`, error);
+        }
+      )
+    );
+
     const unsubG = onSnapshot(collection(db, "gastos"), (snap) => {
       setGastos(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     });
+
     return () => {
-      unsubV();
+      cancelarVentas.forEach((cancelar) => cancelar());
       unsubG();
     };
   }, []);
@@ -90,9 +127,11 @@ const ReportsPage = () => {
     const ahora = new Date();
     const inicioHoy = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate()).getTime();
     let desde = 0;
+
     if (periodo === "hoy") desde = inicioHoy;
     if (periodo === "7d") desde = inicioHoy - 6 * 86400000;
     if (periodo === "mes") desde = new Date(ahora.getFullYear(), ahora.getMonth(), 1).getTime();
+
     return ventas.filter((v) => {
       const enRango = new Date(v.fecha).getTime() >= desde;
       const enSede = v.sede === sedeActiva;
@@ -104,9 +143,11 @@ const ReportsPage = () => {
     const ahora = new Date();
     const inicioHoy = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate()).getTime();
     let desde = 0;
+
     if (periodo === "hoy") desde = inicioHoy;
     if (periodo === "7d") desde = inicioHoy - 6 * 86400000;
     if (periodo === "mes") desde = new Date(ahora.getFullYear(), ahora.getMonth(), 1).getTime();
+
     return gastos.filter((g) => {
       const enRango = new Date(g.fecha).getTime() >= desde;
       const enSede = g.sede === sedeActiva;
@@ -114,12 +155,10 @@ const ReportsPage = () => {
     });
   }, [gastos, periodo, sedeActiva]);
 
-  // Total movido (ventas + gastos) para la tarjeta grande
   const totalVentas = ventasFiltradas.reduce((s, v) => s + (Number(v.total) || 0), 0);
   const totalGastos = gastosFiltrados.reduce((s, g) => s + (Number(g.monto) || 0), 0);
   const totalMovido = totalVentas + totalGastos;
 
-  // Agrupar por vendedor (solo para mostrar sus ventas)
   const porVendedor = useMemo(() => {
     const mapa = {};
 
@@ -137,6 +176,7 @@ const ReportsPage = () => {
   const enviarPorCorreo = async () => {
     setMensaje(null);
     setEnviando(true);
+
     try {
       const porVendedorTexto =
         porVendedor
@@ -192,6 +232,7 @@ const ReportsPage = () => {
               Detalle de ventas por vendedor · {nombreSede(sedeActiva)} · {ETIQUETAS_PERIODO[periodo]}
             </Typography>
           </Box>
+
           <Box sx={{ display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap" }}>
             <ToggleButtonGroup
               exclusive
@@ -203,9 +244,11 @@ const ReportsPage = () => {
                 <ToggleButton key={k} value={k}>{label}</ToggleButton>
               ))}
             </ToggleButtonGroup>
+
             <Button variant="outlined" startIcon={<PrintOutlinedIcon />} onClick={() => window.print()}>
               Imprimir
             </Button>
+
             {!esAdmin && (
               <Button
                 variant="contained"
@@ -222,7 +265,6 @@ const ReportsPage = () => {
 
         {mensaje && <Alert severity={mensaje.tipo} sx={{ mb: 2 }}>{mensaje.texto}</Alert>}
 
-        {/* TARJETA GRANDE: TOTAL MOVIDO */}
         <Grid container spacing={3} sx={{ mb: 3 }}>
           <Grid item xs={12} sm={4}>
             <Paper sx={{ p: 3, bgcolor: "primary.light" }}>
@@ -234,6 +276,7 @@ const ReportsPage = () => {
               </Typography>
             </Paper>
           </Grid>
+
           <Grid item xs={12} sm={4}>
             <Paper sx={{ p: 3 }}>
               <Typography color="text.secondary">Ventas</Typography>
@@ -243,6 +286,7 @@ const ReportsPage = () => {
               </Typography>
             </Paper>
           </Grid>
+
           <Grid item xs={12} sm={4}>
             <Paper sx={{ p: 3 }}>
               <Typography color="text.secondary">Gastos y pagos</Typography>
@@ -254,10 +298,10 @@ const ReportsPage = () => {
           </Grid>
         </Grid>
 
-        {/* TARJETAS POR VENDEDOR CON DRILL-DOWN DE PRODUCTOS */}
         <Typography variant="h6" fontWeight={700} sx={{ mb: 1 }}>
           {esAdmin ? "Ventas por vendedor" : "Mis ventas"}
         </Typography>
+
         {porVendedor.length === 0 ? (
           <Paper sx={{ p: 3, textAlign: "center" }}>
             <Typography variant="body2" color="text.secondary">
@@ -318,11 +362,7 @@ const ReportsPage = () => {
                                     setVentaAbierta(ventaAbierta === venta.id ? null : venta.id);
                                   }}
                                 >
-                                  {ventaAbierta === venta.id ? (
-                                    <KeyboardArrowUpIcon />
-                                  ) : (
-                                    <KeyboardArrowDownIcon />
-                                  )}
+                                  {ventaAbierta === venta.id ? <KeyboardArrowUpIcon /> : <KeyboardArrowDownIcon />}
                                 </IconButton>
                               </TableCell>
                               <TableCell>{fmtFecha(venta.fecha)}</TableCell>
@@ -346,8 +386,8 @@ const ReportsPage = () => {
                                         {(venta.items || []).map((i, k) => (
                                           <TableRow key={k}>
                                             <TableCell>{i.nombre}</TableCell>
-                                            <TableCell align="right">{i.cantidad} × {cop(i.precio)}</TableCell>
-                                            <TableCell align="right">{cop(i.cantidad * i.precio)}</TableCell>
+                                            <TableCell align="right">{i.cantidad} × {cop(precioDe(i))}</TableCell>
+                                            <TableCell align="right">{cop(subtotalDe(i))}</TableCell>
                                           </TableRow>
                                         ))}
                                       </TableBody>
