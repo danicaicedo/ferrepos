@@ -1,6 +1,3 @@
-**Página `src/pages/SalesPage.jsx`**. Abre [el editor de GitHub](https://github.com/danicaicedo/ferrepos/edit/main/src/pages/SalesPage.jsx), reemplaza **todo** el contenido por este código y pulsa **Commit changes**. Este archivo corrige la pantalla **Mis ventas / Ventas**.
-
-```jsx
 import { useEffect, useMemo, useState } from "react";
 import {
   Box,
@@ -439,4 +436,3 @@ const SalesPage = () => {
 };
 
 export default SalesPage;
-```
