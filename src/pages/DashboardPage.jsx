@@ -26,11 +26,16 @@ import WarningAmberOutlinedIcon from "@mui/icons-material/WarningAmberOutlined";
 import NotificationsOutlinedIcon from "@mui/icons-material/NotificationsOutlined";
 import { collection, doc, onSnapshot, updateDoc } from "firebase/firestore";
 import { db } from "../firebase";
-import { nombreSede, stockDe, SEDES } from "../config";
+import { nombreSede, stockDe } from "../config";
 import { useSede } from "../context/SedeContext";
 import Animate from "../components/common/Animate";
 
 const cop = (n) => "$" + Number(n).toLocaleString("es-CO");
+const unidadesDe = (item) => Number(item.cantidad) || 0;
+const subtotalDe = (item) => {
+  const precio = Number(item.precioCobrado ?? item.precio ?? item.precioBase ?? 0);
+  return Number(item.subtotal ?? unidadesDe(item) * precio) || 0;
+};
 
 const ETIQUETAS_PERIODO = {
   hoy: "Hoy",
@@ -70,35 +75,40 @@ const StatCard = ({ icono, color, valor, titulo, detalle }) => (
   </Paper>
 );
 
-// Agrupa ventas por (etiqueta del eje, sede1, sede2) según el periodo
 const agruparVentas = (ventas, periodo) => {
   const ahora = new Date();
 
   if (periodo === "hoy") {
     const inicioHoy = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate());
     const horas = {};
+
     ventas.forEach((v) => {
       const fv = new Date(v.fecha);
       if (fv < inicioHoy) return;
+
       const clave = `${String(fv.getHours()).padStart(2, "0")}:00`;
       if (!horas[clave]) horas[clave] = { label: clave, orden: fv.getHours(), sede1: 0, sede2: 0 };
       if (v.sede === "sede1") horas[clave].sede1 += v.total || 0;
       else if (v.sede === "sede2") horas[clave].sede2 += v.total || 0;
     });
+
     return Object.values(horas).sort((a, b) => a.orden - b.orden);
   }
 
   if (periodo === "7d") {
     const diasSemana = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
     const result = [];
+
     for (let i = 6; i >= 0; i--) {
       const d = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate() - i);
       const inicioDia = new Date(d.getFullYear(), d.getMonth(), d.getDate());
       const finDia = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+
       const ventasDia = ventas.filter((v) => {
         const fv = new Date(v.fecha);
         return fv >= inicioDia && fv <= finDia;
       });
+
       result.push({
         label: i === 0 ? "Hoy" : diasSemana[d.getDay()],
         orden: 6 - i,
@@ -106,37 +116,46 @@ const agruparVentas = (ventas, periodo) => {
         sede2: ventasDia.filter((v) => v.sede === "sede2").reduce((s, v) => s + (v.total || 0), 0),
       });
     }
+
     return result;
   }
 
   if (periodo === "mes") {
     const inicioMes = new Date(ahora.getFullYear(), ahora.getMonth(), 1);
     const result = [];
+
     for (let i = 0; i < 5; i++) {
       const inicioSem = new Date(inicioMes.getTime() + i * 7 * 86400000);
       const finSem = new Date(inicioSem.getTime() + 7 * 86400000 - 1);
+
       const ventasSem = ventas.filter((v) => {
         const fv = new Date(v.fecha);
         return fv >= inicioSem && fv <= finSem && fv >= inicioMes;
       });
+
       const sede1 = ventasSem.filter((v) => v.sede === "sede1").reduce((s, v) => s + (v.total || 0), 0);
       const sede2 = ventasSem.filter((v) => v.sede === "sede2").reduce((s, v) => s + (v.total || 0), 0);
+
       if (sede1 === 0 && sede2 === 0 && i > 3) continue;
       result.push({ label: `Sem ${i + 1}`, orden: i, sede1, sede2 });
     }
+
     return result;
   }
 
   if (periodo === "año") {
     const meses = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
     const result = [];
+
     for (let m = 0; m <= ahora.getMonth(); m++) {
       const inicioMes = new Date(ahora.getFullYear(), m, 1);
       const finMes = new Date(ahora.getFullYear(), m + 1, 0, 23, 59, 59, 999);
+
       const ventasMes = ventas.filter((v) => {
         const fv = new Date(v.fecha);
         return fv >= inicioMes && fv <= finMes;
       });
+
       result.push({
         label: meses[m],
         orden: m,
@@ -144,6 +163,7 @@ const agruparVentas = (ventas, periodo) => {
         sede2: ventasMes.filter((v) => v.sede === "sede2").reduce((s, v) => s + (v.total || 0), 0),
       });
     }
+
     return result;
   }
 
@@ -158,23 +178,54 @@ const DashboardPage = () => {
   const [panelAlertas, setPanelAlertas] = useState(false);
 
   useEffect(() => {
-    const unsubV = onSnapshot(collection(db, "sales"), (snap) => {
-      setVentas(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-    });
+    const colecciones = ["sales", "ventas"];
+    const porColeccion = new Map();
+
+    const actualizarVentas = () => {
+      const porId = new Map();
+
+      for (const nombre of colecciones) {
+        for (const venta of porColeccion.get(nombre) || []) {
+          porId.set(venta.id, venta);
+        }
+      }
+
+      setVentas([...porId.values()]);
+    };
+
+    const cancelarVentas = colecciones.map((nombre) =>
+      onSnapshot(
+        collection(db, nombre),
+        (snap) => {
+          porColeccion.set(
+            nombre,
+            snap.docs.map((d) => ({ ...d.data(), id: d.id }))
+          );
+          actualizarVentas();
+        },
+        (error) => {
+          porColeccion.delete(nombre);
+          actualizarVentas();
+          console.warn(`No se pudieron cargar las estadísticas de ${nombre}.`, error);
+        }
+      )
+    );
+
     const unsubP = onSnapshot(collection(db, "products"), (snap) => {
       setProductos(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     });
+
     return () => {
-      unsubV();
+      cancelarVentas.forEach((cancelar) => cancelar());
       unsubP();
     };
   }, []);
 
-  // Alertas por sede activa (usa las banderas del centinela silencioso)
   const bajoStockEnSede = useMemo(
     () => productos.filter((p) => stockDe(p, sedeActiva) <= p.minimo),
     [productos, sedeActiva]
   );
+
   const sinLeer = bajoStockEnSede.filter((p) => !p[`alertaVista_${sedeActiva}`]);
 
   const abrirPanelAlertas = () => {
@@ -187,21 +238,22 @@ const DashboardPage = () => {
   const datosGrafica = useMemo(() => agruparVentas(ventas, periodo), [ventas, periodo]);
   const maxBar = Math.max(...datosGrafica.flatMap((d) => [d.sede1, d.sede2]), 1);
 
-  // Tarjetas
   const inicioHoy = new Date(
     new Date().getFullYear(),
     new Date().getMonth(),
     new Date().getDate()
   );
+
   const ventasHoy = ventas.filter((v) => new Date(v.fecha) >= inicioHoy);
   const totalHoy = ventasHoy.reduce((s, v) => s + (v.total || 0), 0);
   const unidadesHoy = ventasHoy.reduce(
-    (s, v) => s + (v.items || []).reduce((a, i) => a + i.cantidad, 0),
+    (s, v) => s + (v.items || []).reduce((a, i) => a + unidadesDe(i), 0),
     0
   );
 
   const ventasPeriodo = useMemo(() => {
     const ahora = new Date();
+
     if (periodo === "hoy") return ventasHoy;
     if (periodo === "7d") {
       const desde = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate() - 6);
@@ -220,16 +272,17 @@ const DashboardPage = () => {
 
   const totalPeriodo = ventasPeriodo.reduce((s, v) => s + (v.total || 0), 0);
 
-  // Top 5 productos del periodo
   const topProductos = useMemo(() => {
     const mapa = {};
+
     ventasPeriodo.forEach((v) =>
       (v.items || []).forEach((i) => {
         if (!mapa[i.nombre]) mapa[i.nombre] = { nombre: i.nombre, unidades: 0, total: 0 };
-        mapa[i.nombre].unidades += i.cantidad;
-        mapa[i.nombre].total += i.cantidad * (i.precio || 0);
+        mapa[i.nombre].unidades += unidadesDe(i);
+        mapa[i.nombre].total += subtotalDe(i);
       })
     );
+
     return Object.values(mapa).sort((a, b) => b.unidades - a.unidades).slice(0, 5);
   }, [ventasPeriodo]);
 
@@ -244,11 +297,11 @@ const DashboardPage = () => {
             </Badge>
           </IconButton>
         </Box>
+
         <Typography variant="body2" color="text.secondary" mb={3}>
           Pulso del negocio — vendiendo en <b>{nombreSede(sedeActiva)}</b>
         </Typography>
 
-        {/* Panel lateral de alertas */}
         <Drawer anchor="right" open={panelAlertas} onClose={() => setPanelAlertas(false)}>
           <Box sx={{ width: 340, p: 3 }}>
             <Typography variant="h6" fontWeight={700} mb={1}>
@@ -277,7 +330,6 @@ const DashboardPage = () => {
           </Box>
         </Drawer>
 
-        {/* 4 tarjetas */}
         <Grid container spacing={3} sx={{ mb: 3 }}>
           <Grid item xs={12} sm={6} lg={3}>
             <StatCard
@@ -317,7 +369,6 @@ const DashboardPage = () => {
           </Grid>
         </Grid>
 
-        {/* Selector de periodo + gráfica + top productos */}
         <Box sx={{ display: "flex", justifyContent: "flex-end", mb: 2 }}>
           <ToggleButtonGroup
             exclusive
@@ -335,7 +386,10 @@ const DashboardPage = () => {
           <Grid item xs={12} md={8}>
             <Paper sx={{ p: 3, height: "100%" }}>
               <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 2 }}>
-                <Typography fontWeight={700}>Ventas por {ETIQUETAS_PERIODO[periodo].toLowerCase()}</Typography>
+                <Typography fontWeight={700}>
+                  Ventas por {ETIQUETAS_PERIODO[periodo].toLowerCase()}
+                </Typography>
+
                 <Box sx={{ display: "flex", gap: 1.5, alignItems: "center" }}>
                   <Box sx={{ display: "flex", gap: 0.5, alignItems: "center" }}>
                     <Box sx={{ width: 12, height: 12, borderRadius: "3px", bgcolor: colors.blue[600] }} />
@@ -348,7 +402,7 @@ const DashboardPage = () => {
                 </Box>
               </Box>
 
-              {datosGrafica.length === 0 || (datosGrafica.every(d => d.sede1 === 0 && d.sede2 === 0)) ? (
+              {datosGrafica.length === 0 || datosGrafica.every((d) => d.sede1 === 0 && d.sede2 === 0) ? (
                 <Typography variant="body2" color="text.secondary" sx={{ py: 6, textAlign: "center" }}>
                   No hay ventas en este periodo.
                 </Typography>
@@ -389,6 +443,7 @@ const DashboardPage = () => {
                           }}
                         />
                       </Box>
+
                       <Typography variant="caption" color="text.secondary">
                         {d.label}
                       </Typography>
@@ -402,6 +457,7 @@ const DashboardPage = () => {
           <Grid item xs={12} md={4}>
             <Paper sx={{ p: 3, height: "100%" }}>
               <Typography fontWeight={700} mb={1}>🏆 Top productos del periodo</Typography>
+
               {topProductos.length === 0 ? (
                 <Typography variant="body2" color="text.secondary" sx={{ py: 3, textAlign: "center" }}>
                   Sin ventas en el periodo.
